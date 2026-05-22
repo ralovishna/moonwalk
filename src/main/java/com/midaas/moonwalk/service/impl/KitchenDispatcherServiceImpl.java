@@ -9,6 +9,7 @@ import com.midaas.moonwalk.service.CookingSimulatorService;
 import com.midaas.moonwalk.service.KitchenDispatcherService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
@@ -44,11 +45,9 @@ public class KitchenDispatcherServiceImpl implements KitchenDispatcherService {
             var availableChefOpt = resourceRepository.findFirstByRestaurantIdAndIsAvailableTrue(restaurantId);
             if (availableChefOpt.isEmpty()) return false;
 
-            // Reserve item
             item.setStatus(OrderItemStatus.PREPARING);
             orderItemRepository.save(item);
 
-            // Reserve chef
             KitchenResource chef = availableChefOpt.get();
             chef.setAvailable(false);
             chef.setCurrentOrderItemId(orderItemId);
@@ -57,8 +56,7 @@ public class KitchenDispatcherServiceImpl implements KitchenDispatcherService {
             log.info("Assigned Dish {} to Chef {}", orderItemId, chef.getResourceName());
             return true;
 
-        } catch (org.springframework.orm.ObjectOptimisticLockingFailureException | org.springframework.dao.DataIntegrityViolationException e) {
-            // MAGIC FIX: Catch the collision gracefully!
+        } catch (ObjectOptimisticLockingFailureException | DataIntegrityViolationException e) {
             log.debug("Concurrency collision for Dish {}: Another chef grabbed it first. Safely ignoring.", orderItemId);
             return false;
         }
@@ -130,16 +128,13 @@ public class KitchenDispatcherServiceImpl implements KitchenDispatcherService {
 
     private void dispatchAsMuchAsPossible(Long restaurantId) {
 
-        // What course is currently available to be cooked?
         Integer activeCourse = orderItemRepository.findMinCourseSequenceForStatus(restaurantId, OrderItemStatus.QUEUED);
         if (activeCourse == null) return;
 
         while (true) {
-            // stop if no chefs
             var chefOpt = resourceRepository.findFirstByRestaurantIdAndIsAvailableTrue(restaurantId);
             if (chefOpt.isEmpty()) return;
 
-            // pick next dish of THIS course only
             var nextDishOpt = orderItemRepository
                     .findFirstByRestaurantIdAndStatusAndCourseSequenceOrderByCreatedAtAsc(
                             restaurantId, OrderItemStatus.QUEUED, activeCourse);
@@ -150,11 +145,9 @@ public class KitchenDispatcherServiceImpl implements KitchenDispatcherService {
 
             boolean assigned = self.tryAssignDishToChef(restaurantId, nextDish.getId());
             if (!assigned) {
-                // someone else took it (race) → retry loop to fetch next
                 continue;
             }
 
-            // emit + cook
             try {
                 Map<String, Object> payloadMap = Map.of(
                         "orderItemId", nextDish.getId(),

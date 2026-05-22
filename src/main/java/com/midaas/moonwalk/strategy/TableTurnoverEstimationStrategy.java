@@ -22,13 +22,12 @@ public class TableTurnoverEstimationStrategy {
             return Instant.now();
         }
 
-        // Only calculate time for courses that are NOT yet READY_FOR_SERVE or eaten
         Map<Integer, List<OrderItem>> pendingItemsByCourse = order.getItems().stream()
-                .filter(item -> item.getStatus() != OrderItemStatus.READY_FOR_SERVE) // Assume READY_FOR_SERVE means it's done cooking
+                .filter(item -> item.getStatus() != OrderItemStatus.READY_FOR_SERVE)
                 .collect(Collectors.groupingBy(OrderItem::getCourseSequence));
 
         if (pendingItemsByCourse.isEmpty()) {
-            return Instant.now(); // They are done!
+            return Instant.now();
         }
 
         int remainingSeconds = 0;

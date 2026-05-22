@@ -45,7 +45,6 @@ public class TableManagerServiceImpl implements TableManagerService {
             );
         }
 
-        // 1. Look for an empty table big enough for the party
         var availableTable = tableRepository.findFirstByRestaurantIdAndCapacityGreaterThanEqualAndIsOccupiedFalseOrderByCapacityAsc(restaurantId, partySize);
 
         if (availableTable.isPresent()) {
@@ -57,22 +56,19 @@ public class TableManagerServiceImpl implements TableManagerService {
             return new WalkInResponse(true, table.getId(), "Table available! Please follow the host to table " + table.getTableNumber(), 0);
         }
 
-        // 2. NO TABLES FREE: Add to IN-MEMORY Waitlist!
         log.info("Restaurant full. Adding Customer {} to Waitlist...", customerName);
         waitlistManager.addCustomer(restaurantId, customerName, partySize);
 
-        // 3. Calculate ETA
         List<Order> activeOrders = orderRepository.findByRestaurantIdAndStatusIn(
                 restaurantId,
                 List.of(OrderStatus.TABLE_ASSIGNED, OrderStatus.KITCHEN_PREPARING, OrderStatus.SERVED)
         );
 
-        int waitlistEtaSeconds = 900; // Default 15 minutes
+        int waitlistEtaSeconds = 900;
 
         if (!activeOrders.isEmpty()) {
             Optional<Instant> soonestFreedTimeOpt = activeOrders.stream()
                     .map(turnoverStrategy::calculateTableFreedTime)
-                    // Only consider times in the future to avoid 0 ETA
                     .filter(time -> time.isAfter(Instant.now()))
                     .min(Comparator.naturalOrder());
 

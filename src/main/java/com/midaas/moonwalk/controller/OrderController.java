@@ -29,12 +29,10 @@ public class OrderController {
     public ResponseEntity<OrderResponse> placeOrder(@Valid @RequestBody OrderRequest request) {
         log.info("HTTP POST /api/v1/orders - Received new Dine-In order for Table ID: {}", request.tableId());
 
-        // Calls our new DDD method that handles course splitting
         var savedOrder = orchestratorService.placeDineInOrder(request.restaurantId(), request.tableId(), request);
 
         log.debug("HTTP POST /api/v1/orders - Successfully created Order ID: {}", savedOrder.getId());
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .body(orderMapper.toResponse(savedOrder));
+        return ResponseEntity.status(HttpStatus.CREATED).body(orderMapper.toResponse(savedOrder));
     }
 
     @GetMapping("/{orderId}")

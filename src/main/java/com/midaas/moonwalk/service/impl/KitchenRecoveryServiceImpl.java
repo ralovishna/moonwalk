@@ -25,10 +25,7 @@ public class KitchenRecoveryServiceImpl implements KitchenRecoveryService {
     @Override
     public void recoverStuckOrders() {
 
-        // =================================================================
-        // PHASE 1: HEAL "PREPARING" DISHES (Chef died/crashed mid-cooking)
-        // =================================================================
-        Instant threshold = Instant.now().minusSeconds(600); // 10 minutes fallback
+        Instant threshold = Instant.now().minusSeconds(600);
 
         List<OrderItem> stuckDishes = orderItemRepository.findByStatusAndUpdatedAtBefore(
                 OrderItemStatus.PREPARING,
@@ -41,7 +38,6 @@ public class KitchenRecoveryServiceImpl implements KitchenRecoveryService {
             for (OrderItem dish : stuckDishes) {
                 try {
                     log.info("Healing Dish (Item ID: {})", dish.getId());
-                    // We now use the actual restaurantId from the database!
                     kitchenDispatcher.markDishReady(dish.getRestaurantId(), dish.getId());
                 } catch (Exception e) {
                     log.error("Failed to heal Dish (Item ID: {})", dish.getId(), e);
@@ -49,14 +45,10 @@ public class KitchenRecoveryServiceImpl implements KitchenRecoveryService {
             }
         }
 
-        // =================================================================
-        // PHASE 2: WAKE UP "QUEUED" DISHES (Kafka message dropped/Server restarted)
-        // =================================================================
         List<Long> stalledRestaurants = orderItemRepository.findDistinctRestaurantIdsByStatus(OrderItemStatus.QUEUED);
 
         for (Long restaurantId : stalledRestaurants) {
             try {
-                // This tells the dispatcher: "Hey, check if you have free chefs and queued food!"
                 kitchenDispatcher.kickstartDispatcher(restaurantId);
             } catch (Exception e) {
                 log.error("Failed to kickstart dispatcher for Restaurant {}", restaurantId, e);

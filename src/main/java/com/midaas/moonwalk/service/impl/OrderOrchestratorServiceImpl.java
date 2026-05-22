@@ -1,6 +1,5 @@
 package com.midaas.moonwalk.service.impl;
 
-// Add these imports:
 import com.midaas.moonwalk.repository.OrderExecutionLogRepository;
 import com.midaas.moonwalk.mapper.OrderExecutionLogMapper;
 import com.midaas.moonwalk.repository.KitchenResourceRepository;
@@ -12,14 +11,12 @@ import com.midaas.moonwalk.entity.DiningTable;
 import com.midaas.moonwalk.entity.MenuItem;
 import com.midaas.moonwalk.entity.Order;
 import com.midaas.moonwalk.entity.OrderItem;
-import com.midaas.moonwalk.entity.WaitlistEntry;
 import com.midaas.moonwalk.enums.OrderItemStatus;
 import com.midaas.moonwalk.enums.OrderStatus;
 import com.midaas.moonwalk.repository.DiningTableRepository;
 import com.midaas.moonwalk.repository.MenuItemRepository;
 import com.midaas.moonwalk.repository.OrderItemRepository;
 import com.midaas.moonwalk.repository.OrderRepository;
-import com.midaas.moonwalk.repository.WaitlistRepository;
 import com.midaas.moonwalk.service.OrderOrchestratorService;
 import com.midaas.moonwalk.service.WaitlistManagerService;
 import com.midaas.moonwalk.strategy.KitchenCourseEstimationStrategy;
@@ -50,13 +47,10 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // --- ADD THESE ---
     private final OrderExecutionLogRepository logRepository;
     private final OrderExecutionLogMapper logMapper;
     private final KitchenResourceRepository resourceRepository;
-    // -----------------
 
-    // --- ADD THIS HELPER METHOD ---
     private void logOrderStateChange(Order order, String eventType) {
         var totalChefs = resourceRepository.findAllByRestaurantId(order.getRestaurantId()).size();
         var availableChefs = resourceRepository.countByRestaurantIdAndIsAvailableTrue(order.getRestaurantId());
@@ -68,11 +62,10 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
         var executionLog = logMapper.toExecutionLog(
                 order, order.getRestaurantId(), order.getStatus(),
                 0, timeElapsed, activeWorkers, backlogCount,
-                eventType // e.g., "ORDER_QUEUED", "ORDER_SERVED"
+                eventType
         );
         logRepository.save(executionLog);
     }
-    // ------------------------------
 
     @Override
     public Order getOrder(Long orderId) {
@@ -98,14 +91,12 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
                 .tableId(tableId)
                 .customerName(request.customerName())
                 .partySize(request.partySize())
-                .status(OrderStatus.QUEUED) // Note: Make sure it starts as QUEUED!
+                .status(OrderStatus.QUEUED)
                 .build();
 
         order = orderRepository.save(order);
 
-        // --- LOG THE INITIAL CREATION ---
         logOrderStateChange(order, "ORDER_QUEUED");
-        // --------------------------------
 
         List<OrderItem> savedItems = new ArrayList<>();
 
@@ -134,12 +125,10 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
 
         int firstCourseEta = courseEstimationStrategy.calculateItemEtaInSeconds(firstCourseItem, restaurantId);
         order.setEstimatedCompletionAt(Instant.now().plusSeconds(firstCourseEta));
-        order.setStatus(OrderStatus.KITCHEN_PREPARING); // Move to PREPARING now that food is sent
+        order.setStatus(OrderStatus.KITCHEN_PREPARING);
         orderRepository.save(order);
 
-        // --- LOG THE TRANSITION TO KITCHEN ---
         logOrderStateChange(order, "ORDER_PREPARING");
-        // -------------------------------------
 
         savedItems.stream()
                 .filter(i -> i.getCourseSequence() == 1)
@@ -161,9 +150,7 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
             order.setStatus(OrderStatus.SERVED);
             orderRepository.save(order);
 
-            // --- LOG THAT THEY ARE EATING ---
             logOrderStateChange(order, "ORDER_SERVED");
-            // --------------------------------
 
             Thread.sleep(eatingTimeSeconds * 1000L);
             log.info("AUTO-EATING: Customers for Order {} finished eating Course {}.", orderId, currentCourse);
@@ -181,9 +168,7 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
                 order.setEstimatedCompletionAt(Instant.now().plusSeconds(nextCourseEta));
                 orderRepository.save(order);
 
-                // --- LOG THAT WE WENT BACK TO PREPARING ---
                 logOrderStateChange(order, "ORDER_PREPARING");
-                // ------------------------------------------
 
                 nextCourseItems.forEach(item -> publishDishToKitchen(order.getRestaurantId(), item));
 
@@ -203,9 +188,7 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
         order.setStatus(OrderStatus.COMPLETED);
         orderRepository.save(order);
 
-        // --- LOG THAT THE ORDER IS 100% DONE ---
         logOrderStateChange(order, "ORDER_COMPLETED");
-        // ---------------------------------------
 
         if (order.getTableId() != null) {
             DiningTable table = tableRepository.findById(order.getTableId()).orElseThrow();

@@ -24,7 +24,7 @@ public class CookingSimulatorServiceImpl implements CookingSimulatorService {
 
             Thread.sleep(prepTimeSeconds * 1000L);
 
-            log.info("Ding! Cooking time is over for Dish (Item ID: {}). Auto-completing...", orderItemId);
+            log.info("Cooking time is over for Dish (Item ID: {}). Auto-completing...", orderItemId);
 
             kitchenDispatcher.markDishReady(restaurantId, orderItemId);
 

@@ -40,7 +40,6 @@ public class OrderEventListener {
         try {
             JsonNode payload = objectMapper.readTree(messagePayload);
 
-            // We only care about when a chef picks up a dish, or finishes a dish
             if (!payload.has("assigned") && !payload.has("isReady")) {
                 return;
             }
@@ -57,15 +56,12 @@ public class OrderEventListener {
                 newStatus = OrderItemStatus.READY_FOR_SERVE;
             }
 
-            // If the status changed, update the DB and log it
             if (orderItem.getStatus() != newStatus) {
                 orderItem.setStatus(newStatus);
                 orderItemRepository.save(orderItem);
 
-                // --- 1. WRITE THE EXECUTION LOG FOR THIS DISH ---
                 writeExecutionLog(orderItem, newStatus);
 
-                // --- 2. THE COURSE SEQUENCING MAGIC ---
                 if (newStatus == OrderItemStatus.READY_FOR_SERVE) {
                     checkAndTriggerNextCourse(orderItem);
                 }
@@ -89,8 +85,6 @@ public class OrderEventListener {
 
         int backlogCount = orderItemRepository.countByRestaurantIdAndStatus(restaurantId, OrderItemStatus.QUEUED);
 
-        // We use the parent Order's status just to satisfy the old log structure,
-        // but we record the ITEM's prep time and elapsed time!
         var executionLog = logMapper.toExecutionLog(
                 parentOrder, restaurantId, parentOrder.getStatus(),
                 item.getBasePrepTime(), timeElapsed, activeWorkers, backlogCount,
@@ -103,10 +97,8 @@ public class OrderEventListener {
         Long orderId = finishedItem.getOrderId();
         Integer currentCourse = finishedItem.getCourseSequence();
 
-        // Find all items for this specific course
         List<OrderItem> courseItems = orderItemRepository.findByOrderIdAndCourseSequence(orderId, currentCourse);
 
-        // Check if ANY item in this course is still cooking
         boolean allReady = courseItems.stream()
                 .allMatch(item -> item.getStatus() == OrderItemStatus.READY_FOR_SERVE);
 
@@ -115,7 +107,6 @@ public class OrderEventListener {
 
             int longestPrepTime = courseItems.stream().mapToInt(OrderItem::getBasePrepTime).max().orElse(0);
 
-            // Tell the Orchestrator to start the eating timer, and then queue up Course N+1
             orchestratorService.simulateEatingAndQueueNextCourse(orderId, currentCourse, longestPrepTime);
         }
     }

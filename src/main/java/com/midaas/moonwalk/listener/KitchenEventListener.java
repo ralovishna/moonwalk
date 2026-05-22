@@ -16,14 +16,13 @@ public class KitchenEventListener {
     private final KitchenDispatcherService kitchenDispatcher;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // Notice the topic changed to kitchen.events!
     @KafkaListener(topics = "moonwalk.kitchen.events", groupId = "kitchen-service-group")
     public void handleDishQueued(String messagePayload) {
         try {
             var payload = objectMapper.readTree(messagePayload);
 
             if (payload.has("assigned") || payload.has("isReady")) {
-                return; // Ignore events meant for the Order service
+                return;
             }
 
             log.info("Kitchen Consumer received new dish: {}", messagePayload);

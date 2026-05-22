@@ -38,7 +38,6 @@ public abstract class BaseEntity {
     @Column(name = "version", nullable = false)
     private Integer version;
 
-    // Standard JPA Hook: Runs automatically right before an INSERT statement executes
     @PrePersist
     protected void onCreate() {
         Instant now = Instant.now();
@@ -46,7 +45,6 @@ public abstract class BaseEntity {
         this.updatedAt = now;
     }
 
-    // Standard JPA Hook: Runs automatically right before an UPDATE statement executes
     @PreUpdate
     protected void onUpdate() {
         this.updatedAt = Instant.now();
