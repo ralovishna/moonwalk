@@ -11,4 +11,6 @@ public interface KitchenDispatcherService {
 
     @Transactional
     void markDishReady(Long restaurantId, Long orderItemId);
+
+    void kickstartDispatcher(Long restaurantId);
 }

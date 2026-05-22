@@ -18,16 +18,16 @@ import java.util.List;
 @RequiredArgsConstructor
 public class KitchenRecoveryServiceImpl implements KitchenRecoveryService {
 
-    // Note: Use OrderItemRepository now!
     private final OrderItemRepository orderItemRepository;
     private final KitchenDispatcherService kitchenDispatcher;
 
     @Scheduled(fixedDelay = 30000)
     @Override
     public void recoverStuckOrders() {
-        // For individual dishes, we don't have an ETA stored on the item row itself in this model,
-        // so we just check if it has been stuck in PREPARING for way longer than its prep time.
-        // A simple query: Find PREPARING items updated more than 10 minutes ago (adjust as needed).
+
+        // =================================================================
+        // PHASE 1: HEAL "PREPARING" DISHES (Chef died/crashed mid-cooking)
+        // =================================================================
         Instant threshold = Instant.now().minusSeconds(600); // 10 minutes fallback
 
         List<OrderItem> stuckDishes = orderItemRepository.findByStatusAndUpdatedAtBefore(
@@ -36,17 +36,30 @@ public class KitchenRecoveryServiceImpl implements KitchenRecoveryService {
         );
 
         if (!stuckDishes.isEmpty()) {
-            log.warn("CRON RECOVERY: Found {} stuck dishes. The cooking threads likely died. Auto-healing now...", stuckDishes.size());
+            log.warn("CRON RECOVERY: Found {} stuck PREPARING dishes. Auto-healing now...", stuckDishes.size());
 
             for (OrderItem dish : stuckDishes) {
                 try {
                     log.info("Healing Dish (Item ID: {})", dish.getId());
-                    // Requires restaurantId. You may need to fetch the parent Order to get the restaurantId,
-                    // or add restaurantId to OrderItem. Let's assume restaurantId=1 for this quick fix.
-                    kitchenDispatcher.markDishReady(1L, dish.getId());
+                    // We now use the actual restaurantId from the database!
+                    kitchenDispatcher.markDishReady(dish.getRestaurantId(), dish.getId());
                 } catch (Exception e) {
                     log.error("Failed to heal Dish (Item ID: {})", dish.getId(), e);
                 }
+            }
+        }
+
+        // =================================================================
+        // PHASE 2: WAKE UP "QUEUED" DISHES (Kafka message dropped/Server restarted)
+        // =================================================================
+        List<Long> stalledRestaurants = orderItemRepository.findDistinctRestaurantIdsByStatus(OrderItemStatus.QUEUED);
+
+        for (Long restaurantId : stalledRestaurants) {
+            try {
+                // This tells the dispatcher: "Hey, check if you have free chefs and queued food!"
+                kitchenDispatcher.kickstartDispatcher(restaurantId);
+            } catch (Exception e) {
+                log.error("Failed to kickstart dispatcher for Restaurant {}", restaurantId, e);
             }
         }
     }

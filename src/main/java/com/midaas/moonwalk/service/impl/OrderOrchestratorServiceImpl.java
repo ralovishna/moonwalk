@@ -1,5 +1,11 @@
 package com.midaas.moonwalk.service.impl;
 
+// Add these imports:
+import com.midaas.moonwalk.repository.OrderExecutionLogRepository;
+import com.midaas.moonwalk.mapper.OrderExecutionLogMapper;
+import com.midaas.moonwalk.repository.KitchenResourceRepository;
+
+// (Keep your other imports...)
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.midaas.moonwalk.dto.OrderRequest;
 import com.midaas.moonwalk.entity.DiningTable;
@@ -15,6 +21,7 @@ import com.midaas.moonwalk.repository.OrderItemRepository;
 import com.midaas.moonwalk.repository.OrderRepository;
 import com.midaas.moonwalk.repository.WaitlistRepository;
 import com.midaas.moonwalk.service.OrderOrchestratorService;
+import com.midaas.moonwalk.service.WaitlistManagerService;
 import com.midaas.moonwalk.strategy.KitchenCourseEstimationStrategy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +30,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,12 +43,36 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
 
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
-    private final MenuItemRepository menuItemRepository; // Added this!
+    private final MenuItemRepository menuItemRepository;
     private final KitchenCourseEstimationStrategy courseEstimationStrategy;
     private final DiningTableRepository tableRepository;
-    private final WaitlistRepository waitlistRepository;
+    private final WaitlistManagerService waitlistManager;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // --- ADD THESE ---
+    private final OrderExecutionLogRepository logRepository;
+    private final OrderExecutionLogMapper logMapper;
+    private final KitchenResourceRepository resourceRepository;
+    // -----------------
+
+    // --- ADD THIS HELPER METHOD ---
+    private void logOrderStateChange(Order order, String eventType) {
+        var totalChefs = resourceRepository.findAllByRestaurantId(order.getRestaurantId()).size();
+        var availableChefs = resourceRepository.countByRestaurantIdAndIsAvailableTrue(order.getRestaurantId());
+        int activeWorkers = Math.toIntExact(totalChefs - availableChefs);
+        int backlogCount = orderItemRepository.countByRestaurantIdAndStatus(order.getRestaurantId(), OrderItemStatus.QUEUED);
+
+        int timeElapsed = (int) Duration.between(order.getCreatedAt(), Instant.now()).toSeconds();
+
+        var executionLog = logMapper.toExecutionLog(
+                order, order.getRestaurantId(), order.getStatus(),
+                0, timeElapsed, activeWorkers, backlogCount,
+                eventType // e.g., "ORDER_QUEUED", "ORDER_SERVED"
+        );
+        logRepository.save(executionLog);
+    }
+    // ------------------------------
 
     @Override
     public Order getOrder(Long orderId) {
@@ -50,32 +82,43 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
     @Override
     @Transactional
     public Order placeDineInOrder(Long restaurantId, Long tableId, OrderRequest request) {
+
+        DiningTable table = tableRepository.findById(tableId)
+                .orElseThrow(() -> new IllegalArgumentException("Table ID " + tableId + " does not exist."));
+
+        if (!table.isOccupied()) {
+            table.setOccupied(true);
+            tableRepository.save(table);
+        }
+
         log.info("Creating new Dine-in Order for Table {}", tableId);
 
-        // 1. Create the parent Order
         Order order = Order.builder()
                 .restaurantId(restaurantId)
                 .tableId(tableId)
                 .customerName(request.customerName())
                 .partySize(request.partySize())
-                .status(OrderStatus.KITCHEN_PREPARING)
+                .status(OrderStatus.QUEUED) // Note: Make sure it starts as QUEUED!
                 .build();
 
         order = orderRepository.save(order);
 
+        // --- LOG THE INITIAL CREATION ---
+        logOrderStateChange(order, "ORDER_QUEUED");
+        // --------------------------------
+
         List<OrderItem> savedItems = new ArrayList<>();
 
         for (var itemReq : request.items()) {
-            // Securely fetch the official menu item details from the DB
             MenuItem menuItem = menuItemRepository.findById(Math.toIntExact(itemReq.menuItemId()))
                     .orElseThrow(() -> new IllegalArgumentException("Invalid Menu Item ID: " + itemReq.menuItemId()));
 
             OrderItem item = OrderItem.builder()
                     .orderId(order.getId())
                     .restaurantId(restaurantId)
-                    .dishName(menuItem.getName())            // From DB!
-                    .basePrepTime(menuItem.getBasePrepTime())// From DB!
-                    .courseSequence(menuItem.getCourseSequence()) // From DB!
+                    .dishName(menuItem.getName())
+                    .basePrepTime(menuItem.getBasePrepTime())
+                    .courseSequence(menuItem.getCourseSequence())
                     .status(OrderItemStatus.QUEUED)
                     .build();
 
@@ -84,7 +127,6 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
 
         order.setItems(savedItems);
 
-        // 3. Calculate ETA for the FIRST course to show on the Customer's screen
         OrderItem firstCourseItem = savedItems.stream()
                 .filter(i -> i.getCourseSequence() == 1)
                 .findFirst()
@@ -92,10 +134,13 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
 
         int firstCourseEta = courseEstimationStrategy.calculateItemEtaInSeconds(firstCourseItem, restaurantId);
         order.setEstimatedCompletionAt(Instant.now().plusSeconds(firstCourseEta));
+        order.setStatus(OrderStatus.KITCHEN_PREPARING); // Move to PREPARING now that food is sent
         orderRepository.save(order);
 
-        // 4. Send ONLY Course 1 items to the Kitchen via Kafka!
-        // The Kitchen doesn't need to know about Course 2 yet.
+        // --- LOG THE TRANSITION TO KITCHEN ---
+        logOrderStateChange(order, "ORDER_PREPARING");
+        // -------------------------------------
+
         savedItems.stream()
                 .filter(i -> i.getCourseSequence() == 1)
                 .forEach(item -> publishDishToKitchen(restaurantId, item));
@@ -108,34 +153,41 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
     @Transactional
     public void simulateEatingAndQueueNextCourse(Long orderId, Integer currentCourse, int longestPrepTime) {
         try {
-            // 1. Calculate Eating Time (200% of the longest dish in the course)
             int eatingTimeSeconds = longestPrepTime * 2;
             log.info("AUTO-EATING: Customers for Order {} started eating Course {}. Waiting {} seconds...",
                     orderId, currentCourse, eatingTimeSeconds);
 
-            // 2. The Automation: Thread sleeps while they eat!
+            Order order = orderRepository.findById(orderId).orElseThrow();
+            order.setStatus(OrderStatus.SERVED);
+            orderRepository.save(order);
+
+            // --- LOG THAT THEY ARE EATING ---
+            logOrderStateChange(order, "ORDER_SERVED");
+            // --------------------------------
+
             Thread.sleep(eatingTimeSeconds * 1000L);
             log.info("AUTO-EATING: Customers for Order {} finished eating Course {}.", orderId, currentCourse);
 
-            // 3. Find dishes for the NEXT course
             Integer nextCourse = currentCourse + 1;
             List<OrderItem> nextCourseItems = orderItemRepository.findByOrderIdAndCourseSequence(orderId, nextCourse);
 
             if (!nextCourseItems.isEmpty()) {
                 log.info("AUTOMATION: Sending Course {} to the Kitchen for Order {}...", nextCourse, orderId);
-                Order order = orderRepository.findById(orderId).orElseThrow();
 
-                // Recalculate the ETA for the Customer's screen for Course 2
+                order.setStatus(OrderStatus.KITCHEN_PREPARING);
+
                 OrderItem firstNextCourseItem = nextCourseItems.get(0);
                 int nextCourseEta = courseEstimationStrategy.calculateItemEtaInSeconds(firstNextCourseItem, order.getRestaurantId());
                 order.setEstimatedCompletionAt(Instant.now().plusSeconds(nextCourseEta));
                 orderRepository.save(order);
 
-                // Publish Course 2 to Kafka so Chefs can start cooking it!
+                // --- LOG THAT WE WENT BACK TO PREPARING ---
+                logOrderStateChange(order, "ORDER_PREPARING");
+                // ------------------------------------------
+
                 nextCourseItems.forEach(item -> publishDishToKitchen(order.getRestaurantId(), item));
 
             } else {
-                // No more courses exist! The meal is completely over.
                 log.info("AUTOMATION: Meal complete for Order {}. Freeing the table.", orderId);
                 completeOrderAndFreeTable(orderId);
             }
@@ -151,23 +203,20 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
         order.setStatus(OrderStatus.COMPLETED);
         orderRepository.save(order);
 
+        // --- LOG THAT THE ORDER IS 100% DONE ---
+        logOrderStateChange(order, "ORDER_COMPLETED");
+        // ---------------------------------------
+
         if (order.getTableId() != null) {
             DiningTable table = tableRepository.findById(order.getTableId()).orElseThrow();
 
-            // MAGIC: Check the waitlist for the oldest waiting customer that fits at this table!
-            var nextInLine = waitlistRepository.findFirstByRestaurantIdAndStatusAndPartySizeLessThanEqualOrderByCreatedAtAsc(
-                    order.getRestaurantId(), "WAITING", table.getCapacity());
+            var bestMatchOpt = waitlistManager.popBestMatchForTable(order.getRestaurantId(), table.getCapacity());
 
-            if (nextInLine.isPresent()) {
-                // Auto-assign the table to the person who waited the longest!
-                WaitlistEntry queuedCustomer = nextInLine.get();
-                queuedCustomer.setStatus("SEATED");
-                waitlistRepository.save(queuedCustomer);
-
-                log.info("Table {} freed, automatically assigned to Waitlist Customer: {}", table.getTableNumber(), queuedCustomer.getCustomerName());
-                // (In a real app, this is where you'd trigger a Twilio SMS saying "Your table is ready!")
+            if (bestMatchOpt.isPresent()) {
+                var queuedCustomer = bestMatchOpt.get();
+                log.info("Table {} (Capacity {}) freed, automatically reserved for Waitlist Customer: {} (Party of {})",
+                        table.getTableNumber(), table.getCapacity(), queuedCustomer.customerName(), queuedCustomer.partySize());
             } else {
-                // No one is waiting, leave the table empty
                 table.setOccupied(false);
                 tableRepository.save(table);
                 log.info("Table {} is now clean and empty.", table.getTableNumber());
@@ -182,7 +231,6 @@ public class OrderOrchestratorServiceImpl implements OrderOrchestratorService {
                     "restaurantId", restaurantId,
                     "prepTime", item.getBasePrepTime()
             );
-            // Notice we are sending the orderITEMId now, not the OrderId!
             kafkaTemplate.send("moonwalk.kitchen.events", String.valueOf(restaurantId), objectMapper.writeValueAsString(payload));
             log.info("Sent Course {} item '{}' to kitchen queue.", item.getCourseSequence(), item.getDishName());
         } catch (Exception e) {

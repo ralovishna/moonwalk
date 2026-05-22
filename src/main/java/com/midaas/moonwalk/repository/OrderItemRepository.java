@@ -25,6 +25,9 @@ public interface OrderItemRepository extends JpaRepository<OrderItem, Long> {
             Long restaurantId, OrderItemStatus status, Integer courseSequence
     );
 
+    @Query("SELECT DISTINCT oi.restaurantId FROM OrderItem oi WHERE oi.status = :status")
+    List<Long> findDistinctRestaurantIdsByStatus(OrderItemStatus status);
+
     @Query("""
 select min(oi.courseSequence)
 from OrderItem oi

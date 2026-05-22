@@ -3,12 +3,11 @@ package com.midaas.moonwalk.service.impl;
 import com.midaas.moonwalk.dto.WalkInResponse;
 import com.midaas.moonwalk.entity.DiningTable;
 import com.midaas.moonwalk.entity.Order;
-import com.midaas.moonwalk.entity.WaitlistEntry;
 import com.midaas.moonwalk.enums.OrderStatus;
 import com.midaas.moonwalk.repository.DiningTableRepository;
 import com.midaas.moonwalk.repository.OrderRepository;
-import com.midaas.moonwalk.repository.WaitlistRepository;
 import com.midaas.moonwalk.service.TableManagerService;
+import com.midaas.moonwalk.service.WaitlistManagerService;
 import com.midaas.moonwalk.strategy.TableTurnoverEstimationStrategy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,12 +27,23 @@ public class TableManagerServiceImpl implements TableManagerService {
 
     private final DiningTableRepository tableRepository;
     private final OrderRepository orderRepository;
-    private final WaitlistRepository waitlistRepository;
+    private final WaitlistManagerService waitlistManager;
     private final TableTurnoverEstimationStrategy turnoverStrategy;
 
     @Override
     @Transactional
     public WalkInResponse processWalkIn(Long restaurantId, String customerName, Integer partySize) {
+
+        Integer maxTableCapacity = tableRepository.findMaxCapacityByRestaurantId(restaurantId);
+        if (maxTableCapacity == null || partySize > maxTableCapacity) {
+            log.warn("Rejected Walk-in: Party of {} exceeds max table capacity of {}", partySize, maxTableCapacity);
+            return new WalkInResponse(
+                    false,
+                    null,
+                    "Sorry, our largest table only seats " + maxTableCapacity + " people. We cannot accommodate your party.",
+                    0
+            );
+        }
 
         // 1. Look for an empty table big enough for the party
         var availableTable = tableRepository.findFirstByRestaurantIdAndCapacityGreaterThanEqualAndIsOccupiedFalseOrderByCapacityAsc(restaurantId, partySize);
@@ -47,40 +57,29 @@ public class TableManagerServiceImpl implements TableManagerService {
             return new WalkInResponse(true, table.getId(), "Table available! Please follow the host to table " + table.getTableNumber(), 0);
         }
 
-        // 2. NO TABLES FREE: Add to Database Waitlist!
+        // 2. NO TABLES FREE: Add to IN-MEMORY Waitlist!
         log.info("Restaurant full. Adding Customer {} to Waitlist...", customerName);
-        WaitlistEntry entry = WaitlistEntry.builder()
-                .restaurantId(restaurantId)
-                .customerName(customerName)
-                .partySize(partySize)
-                .status("WAITING")
-                .build();
-        waitlistRepository.save(entry);
+        waitlistManager.addCustomer(restaurantId, customerName, partySize);
 
-        // 3. Calculate Waitlist ETA using Strategy
-        // Fetch all active orders (people currently eating or waiting for food)
+        // 3. Calculate ETA
         List<Order> activeOrders = orderRepository.findByRestaurantIdAndStatusIn(
                 restaurantId,
-                // Using TABLE_ASSIGNED in case they are seated but haven't sent food to kitchen yet
                 List.of(OrderStatus.TABLE_ASSIGNED, OrderStatus.KITCHEN_PREPARING, OrderStatus.SERVED)
         );
 
-        int waitlistEtaSeconds = 900; // Default fallback: 15 mins
+        int waitlistEtaSeconds = 900; // Default 15 minutes
 
         if (!activeOrders.isEmpty()) {
-            // Find the table that will finish the SOONEST
             Optional<Instant> soonestFreedTimeOpt = activeOrders.stream()
                     .map(turnoverStrategy::calculateTableFreedTime)
+                    // Only consider times in the future to avoid 0 ETA
+                    .filter(time -> time.isAfter(Instant.now()))
                     .min(Comparator.naturalOrder());
 
-            Instant soonestFreedTime = soonestFreedTimeOpt.orElse(Instant.now().plusSeconds(900));
-
-            // Calculate seconds from now until that table is free
-            waitlistEtaSeconds = (int) Duration.between(Instant.now(), soonestFreedTime).toSeconds();
-            waitlistEtaSeconds = Math.max(0, waitlistEtaSeconds); // Ensure no negative time
+            if (soonestFreedTimeOpt.isPresent()) {
+                waitlistEtaSeconds = (int) Duration.between(Instant.now(), soonestFreedTimeOpt.get()).toSeconds();
+            }
         }
-
-        log.info("Calculated Waitlist ETA for Customer {}: {} seconds.", customerName, waitlistEtaSeconds);
 
         return new WalkInResponse(
                 false,

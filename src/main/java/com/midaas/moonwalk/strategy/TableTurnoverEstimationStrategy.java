@@ -2,6 +2,7 @@ package com.midaas.moonwalk.strategy;
 
 import com.midaas.moonwalk.entity.Order;
 import com.midaas.moonwalk.entity.OrderItem;
+import com.midaas.moonwalk.enums.OrderItemStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -14,41 +15,36 @@ import java.util.stream.Collectors;
 @Component
 public class TableTurnoverEstimationStrategy {
 
-    private static final double EATING_TIME_MULTIPLIER = 2.0; // Eating takes 200% of prep time
+    private static final double EATING_TIME_MULTIPLIER = 2.0;
 
-    /**
-     * Calculates the exact instant a table will become completely free.
-     */
     public Instant calculateTableFreedTime(Order order) {
         if (order.getItems() == null || order.getItems().isEmpty()) {
             return Instant.now();
         }
 
-        // Group items by their course sequence (1=Appetizers, 2=Mains, 3=Desserts)
-        Map<Integer, List<OrderItem>> itemsByCourse = order.getItems().stream()
+        // Only calculate time for courses that are NOT yet READY_FOR_SERVE or eaten
+        Map<Integer, List<OrderItem>> pendingItemsByCourse = order.getItems().stream()
+                .filter(item -> item.getStatus() != OrderItemStatus.READY_FOR_SERVE) // Assume READY_FOR_SERVE means it's done cooking
                 .collect(Collectors.groupingBy(OrderItem::getCourseSequence));
 
-        int totalTableDurationSeconds = 0;
+        if (pendingItemsByCourse.isEmpty()) {
+            return Instant.now(); // They are done!
+        }
 
-        // Calculate time for each course sequentially
-        for (Integer course : itemsByCourse.keySet().stream().sorted().toList()) {
-            List<OrderItem> courseItems = itemsByCourse.get(course);
-            
-            // The course takes as long as the SLOWEST dish to prepare
+        int remainingSeconds = 0;
+
+        for (Integer course : pendingItemsByCourse.keySet().stream().sorted().toList()) {
+            List<OrderItem> courseItems = pendingItemsByCourse.get(course);
+
             int maxPrepTime = courseItems.stream()
                     .mapToInt(OrderItem::getBasePrepTime)
                     .max()
                     .orElse(0);
 
-            // Total Course Time = Prep Time + Eating Time
             int eatingTime = (int) (maxPrepTime * EATING_TIME_MULTIPLIER);
-            totalTableDurationSeconds += (maxPrepTime + eatingTime);
+            remainingSeconds += (maxPrepTime + eatingTime);
         }
 
-        log.debug("Table {} will be occupied for a total of {} seconds for Order {}", 
-                order.getTableId(), totalTableDurationSeconds, order.getId());
-
-        // Return the final Instant the table will be free
-        return order.getCreatedAt().plusSeconds(totalTableDurationSeconds);
+        return Instant.now().plusSeconds(remainingSeconds);
     }
 }

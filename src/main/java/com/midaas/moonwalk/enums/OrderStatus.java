@@ -1,7 +1,7 @@
 package com.midaas.moonwalk.enums;
 
 public enum OrderStatus {
-    WAITING_FOR_TABLE,
+    QUEUED,
     TABLE_ASSIGNED,
     KITCHEN_PREPARING,
     SERVED,

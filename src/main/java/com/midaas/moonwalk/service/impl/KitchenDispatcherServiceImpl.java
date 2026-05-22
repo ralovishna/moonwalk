@@ -34,25 +34,34 @@ public class KitchenDispatcherServiceImpl implements KitchenDispatcherService {
     @Override
     @Transactional
     public boolean tryAssignDishToChef(Long restaurantId, Long orderItemId) {
-        var item = orderItemRepository.findById(orderItemId).orElseThrow();
+        try {
+            var item = orderItemRepository.findById(orderItemId).orElseThrow();
 
-        if (item.getStatus() != OrderItemStatus.QUEUED) {
-            return false; // already assigned / finished
+            if (item.getStatus() != OrderItemStatus.QUEUED) {
+                return false;
+            }
+
+            var availableChefOpt = resourceRepository.findFirstByRestaurantIdAndIsAvailableTrue(restaurantId);
+            if (availableChefOpt.isEmpty()) return false;
+
+            // Reserve item
+            item.setStatus(OrderItemStatus.PREPARING);
+            orderItemRepository.save(item);
+
+            // Reserve chef
+            KitchenResource chef = availableChefOpt.get();
+            chef.setAvailable(false);
+            chef.setCurrentOrderItemId(orderItemId);
+            resourceRepository.save(chef);
+
+            log.info("Assigned Dish {} to Chef {}", orderItemId, chef.getResourceName());
+            return true;
+
+        } catch (org.springframework.orm.ObjectOptimisticLockingFailureException | org.springframework.dao.DataIntegrityViolationException e) {
+            // MAGIC FIX: Catch the collision gracefully!
+            log.debug("Concurrency collision for Dish {}: Another chef grabbed it first. Safely ignoring.", orderItemId);
+            return false;
         }
-
-        var availableChefOpt = resourceRepository.findFirstByRestaurantIdAndIsAvailableTrue(restaurantId);
-        if (availableChefOpt.isEmpty()) return false;
-
-        item.setStatus(OrderItemStatus.PREPARING);
-        orderItemRepository.save(item);
-
-        KitchenResource chef = availableChefOpt.get();
-        chef.setAvailable(false);
-        chef.setCurrentOrderItemId(orderItemId);
-        resourceRepository.save(chef);
-
-        log.info("Assigned Dish {} to Chef {}", orderItemId, chef.getResourceName());
-        return true;
     }
 
     @Override
@@ -86,6 +95,13 @@ public class KitchenDispatcherServiceImpl implements KitchenDispatcherService {
         freeAssignedChef(orderItemId);
         emitDishReadyEvent(restaurantId, orderItemId);
 
+        dispatchAsMuchAsPossible(restaurantId);
+    }
+
+    @Override
+    @Transactional
+    public void kickstartDispatcher(Long restaurantId) {
+        log.info("CRON RECOVERY: Waking up dispatcher for Restaurant {} to process stranded QUEUED dishes...", restaurantId);
         dispatchAsMuchAsPossible(restaurantId);
     }
 
