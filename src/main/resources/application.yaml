@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: moonwalk
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/moonwalk_db?createDatabaseIfNotExist=true
+    username: dbeaver_user
+    password: StrongPassword!
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: true
+
+#  kafka:
+#    bootstrap-servers: localhost:9092
+#    producer:
+#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+#      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+#    consumer:
+#      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+#      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+#      auto-offset-reset: earliest
+
+  threads:
+    virtual:
+      enabled: true
